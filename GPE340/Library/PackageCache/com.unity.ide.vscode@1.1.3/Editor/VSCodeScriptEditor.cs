@@ -1,18 +1,19 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Collections.Generic;
 using System.Diagnostics;
 using UnityEditor;
 using UnityEngine;
 using Unity.CodeEditor;
 
-namespace VSCodeEditor {
+namespace VSCodeEditor
+{
     [InitializeOnLoad]
     public class VSCodeScriptEditor : IExternalCodeEditor
     {
         const string vscode_argument = "vscode_arguments";
         const string vscode_generate_all = "unity_generate_all_csproj";
+        const string vscode_extension = "vscode_userExtensions";
         static readonly GUIContent k_ResetArguments = EditorGUIUtility.TrTextContent("Reset argument");
         string m_Arguments;
 
@@ -20,12 +21,13 @@ namespace VSCodeEditor {
         IGenerator m_ProjectGeneration;
 
         static readonly string[] k_SupportedFileNames = { "code.exe", "visualstudiocode.app", "visualstudiocode-insiders.app", "vscode.app", "code.app", "code.cmd", "code-insiders.cmd", "code", "com.visualstudio.code" };
-        
+
         static bool IsOSX => Application.platform == RuntimePlatform.OSXEditor;
 
-        static string GetDefaultApp => EditorPrefs.GetString("kScriptsDefaultApp");
+        static string DefaultApp => EditorPrefs.GetString("kScriptsDefaultApp");
 
         static string DefaultArgument { get; } = "\"$(ProjectPath)\" -g \"$(File)\":$(Line):$(Column)";
+
         string Arguments
         {
             get => m_Arguments ?? (m_Arguments = EditorPrefs.GetString(vscode_argument, DefaultArgument));
@@ -34,6 +36,35 @@ namespace VSCodeEditor {
                 m_Arguments = value;
                 EditorPrefs.SetString(vscode_argument, value);
             }
+        }
+
+        static string[] defaultExtensions
+        {
+            get
+            {
+                var customExtensions = new[] { "json", "asmdef", "log" };
+                return EditorSettings.projectGenerationBuiltinExtensions
+                    .Concat(EditorSettings.projectGenerationUserExtensions)
+                    .Concat(customExtensions)
+                    .Distinct().ToArray();
+            }
+        }
+
+        static string[] HandledExtensions
+        {
+            get
+            {
+                return HandledExtensionsString
+                    .Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => s.TrimStart('.', '*'))
+                    .ToArray();
+            }
+        }
+
+        static string HandledExtensionsString
+        {
+            get => EditorPrefs.GetString(vscode_extension, string.Join(";", defaultExtensions));
+            set => EditorPrefs.SetString(vscode_extension, value);
         }
 
         public bool TryGetInstallationForPath(string editorPath, out CodeEditor.Installation installation)
@@ -46,6 +77,7 @@ namespace VSCodeEditor {
                 installation = default;
                 return false;
             }
+
             if (!installations.Any())
             {
                 installation = new CodeEditor.Installation
@@ -80,6 +112,7 @@ namespace VSCodeEditor {
             {
                 Arguments = DefaultArgument;
             }
+
             var prevGenerate = EditorPrefs.GetBool(vscode_generate_all, false);
 
             var generateAll = EditorGUILayout.Toggle("Generate all .csproj files.", prevGenerate);
@@ -87,12 +120,15 @@ namespace VSCodeEditor {
             {
                 EditorPrefs.SetBool(vscode_generate_all, generateAll);
             }
+
             m_ProjectGeneration.GenerateAll(generateAll);
+
+            HandledExtensionsString = EditorGUILayout.TextField(new GUIContent("Extensions handled: "), HandledExtensionsString);
         }
 
         public void CreateIfDoesntExist()
         {
-            if (!m_ProjectGeneration.HasSolutionBeenGenerated())
+            if (!m_ProjectGeneration.SolutionExists())
             {
                 m_ProjectGeneration.Sync();
             }
@@ -111,6 +147,11 @@ namespace VSCodeEditor {
 
         public bool OpenProject(string path, int line, int column)
         {
+            if (path != "" && !SupportsExtension(path)) // Assets - Open C# Project passes empty path here
+            {
+                return false;
+            }
+
             if (line == -1)
                 line = 1;
             if (column == -1)
@@ -137,13 +178,14 @@ namespace VSCodeEditor {
                 return OpenOSX(arguments);
             }
 
+            var app = DefaultApp;
             var process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
-                    FileName = GetDefaultApp,
+                    FileName = app,
                     Arguments = arguments,
-                    WindowStyle = ProcessWindowStyle.Hidden,
+                    WindowStyle = app.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ? ProcessWindowStyle.Hidden : ProcessWindowStyle.Normal,
                     CreateNoWindow = true,
                     UseShellExecute = true,
                 }
@@ -153,20 +195,28 @@ namespace VSCodeEditor {
             return true;
         }
 
-        private bool OpenOSX(string arguments)
+        static bool OpenOSX(string arguments)
         {
             var process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = "open",
-                    Arguments = $"\"{GetDefaultApp}\" --args {arguments}",
+                    Arguments = $"-n \"{DefaultApp}\" --args {arguments}",
                     UseShellExecute = true,
                 }
             };
 
             process.Start();
             return true;
+        }
+
+        static bool SupportsExtension(string path)
+        {
+            var extension = Path.GetExtension(path);
+            if (string.IsNullOrEmpty(extension))
+                return false;
+            return HandledExtensions.Contains(extension.TrimStart('.'));
         }
 
         public CodeEditor.Installation[] Installations => m_Discoverability.PathCallback();
@@ -179,7 +229,7 @@ namespace VSCodeEditor {
 
         static VSCodeScriptEditor()
         {
-            var editor = new VSCodeScriptEditor(new VSCodeDiscovery(), new ProjectGeneration());
+            var editor = new VSCodeScriptEditor(new VSCodeDiscovery(), new ProjectGeneration(Directory.GetParent(Application.dataPath).FullName));
             CodeEditor.Register(editor);
 
             if (IsVSCodeInstallation(CodeEditor.CurrentEditorInstallation))
@@ -188,7 +238,7 @@ namespace VSCodeEditor {
             }
         }
 
-        private static bool IsVSCodeInstallation(string path)
+        static bool IsVSCodeInstallation(string path)
         {
             if (string.IsNullOrEmpty(path))
             {
@@ -202,8 +252,6 @@ namespace VSCodeEditor {
             return k_SupportedFileNames.Contains(filename);
         }
 
-        public void Initialize(string editorInstallationPath)
-        {
-        }
+        public void Initialize(string editorInstallationPath) { }
     }
 }
